@@ -9,11 +9,13 @@ import argparse
 # get ArgumentParser
 def get_args():
     parser = argparse.ArgumentParser()
+    
+    # multi gpu
+    parser.add_argument('--gpu_ids', nargs="+", default=['0', '1', '2', '3'])# --gpu_ids 0 1 2 3
+    parser.add_argument('--master_port', type=str, default='29400')
 
     # multi gpu
     '''
-    parser.add_argument('--gpu_ids', nargs="+", default=['0', '1', '2', '3'])# --gpu_ids 0 1 2 3
-    parser.add_argument('--master_port', type=str, default='29400')
 
     ## dataset
     parser.add_argument("--dataset_path", type=str, default='/jihun')
