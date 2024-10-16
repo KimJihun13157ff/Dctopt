@@ -2,6 +2,7 @@ import argparse
 import os
 import time
 import random
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,27 +17,61 @@ import torch.nn as nn
 
 from torch.utils.data import DataLoader, random_split, TensorDataset
 
-from client.client import Client, DSGD_Communicator
+from client.client import DZO_Client, DSGD_Communicator, DZOK_Communicator, DSGD_Client, DZOK_Client, CHOCO_Client, CHOCO_Communicator, CHOCO_DZO_Client
 
 
 from util.arguments import get_args
 from util.setup_seed import setup_seed
 from model.logistic_regression import LogisticRegression
+from model.cnn_mnist import CNN_MNIST
 from torchvision import datasets, transforms
 
-logging.basicConfig(filename='remote_worker.log', level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)
+
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+
 
 def main_(world_size, args):
-    dummy = 0
+
+    setup_seed(args.seed)
+    if args.opt_strategy == 'DZOK'or args.opt_strategy == 'DZOPK':
+        additional = args.K
+    elif args.opt_strategy == 'CHOCO' or args.opt_strategy == 'CHOCO_DZO':
+        additional = args.sparsification_r
+    else:
+        additional = ""
+
+    wandb.init(project=f"{args.project_name}",
+    name=f'{args.opt_strategy}_seed{args.seed}_lr{args.lr}_{additional}_css{args.consensus_ss}_{args.local_iter}to{args.gossip_iter}',
+    config={
+        "args" : args
+    })
+    logging.info(args)
+    print(args)
+
+    if args.model == "logistic_regression":
+        model = LogisticRegression(784)
+    elif args.model == "CNN_MNIST":
+        model = CNN_MNIST()
+    #candidate_seeds = np.random.randint(1, 2147483647, args.K)
+    candidate_seeds = torch.randint(low=1, high=2147483647, size=(args.K,), dtype=torch.int32)
     
-    model = LogisticRegression(784)
     transform = transforms.Compose([transforms.ToTensor()])
     train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    validation_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
 
     def binary_classification_label_transform(label):
-        return 0.0 if label < 5 else 1.0
-    train_dataset.targets = torch.tensor([binary_classification_label_transform(label) for label in train_dataset.targets])
+        return 0 if label < 5 else 1
     
+    
+    if args.model == "logistic_regression":
+        train_dataset.targets = torch.tensor([binary_classification_label_transform(label) for label in train_dataset.targets])
+        validation_dataset.targets = torch.tensor([binary_classification_label_transform(label) for label in validation_dataset.targets])
     
     
     dataset = train_dataset
@@ -49,48 +84,125 @@ def main_(world_size, args):
     generator = torch.Generator().manual_seed(42)
     subsets = random_split(dataset, lengths, generator=generator)
     dataloaders = [DataLoader(subset, batch_size=batch_size, shuffle=False) for subset in subsets]
-    train_dataloader = DataLoader(dataset, batch_size=60000, shuffle=False)
-    communicator = DSGD_Communicator(args)
+    train_dataloader = DataLoader(dataset, batch_size=128, shuffle=False)
+    validation_dataloader = DataLoader(validation_dataset, batch_size=128, shuffle=False)
+
+    
+    ### communicator
+    
+    if args.opt_strategy == 'DSGD' or args.opt_strategy == "DZO":
+        communicator = DSGD_Communicator(args)
+    elif args.opt_strategy == 'DZOK' or args.opt_strategy == 'DZOPK':
+        communicator = DZOK_Communicator(args, model, candidate_seeds)
+    elif args.opt_strategy == 'CHOCO' or args.opt_strategy == 'CHOCO_DZO':
+        communicator = CHOCO_Communicator(args, args.consensus_ss)
+
     comm_rref = rpc.RRef(communicator)
 
-    ## client list에 client 들 생성
+    ## client
     client_list = []
-    for i in range(args.num_clients):
-        client_list.append(Client(args, model, i, None, 0, comm_rref))
+    if args.opt_strategy == 'DSGD':
+        for i in range(args.num_clients):
+            client_list.append(DSGD_Client(args, model, i, 0, comm_rref))
+    if args.opt_strategy == 'DZO':
+        for i in range(args.num_clients):
+            client_list.append(DZO_Client(args, model, i, 0, comm_rref))
+    if args.opt_strategy == 'DZOK' or args.opt_strategy == 'DZOPK' :
+        for i in range(args.num_clients):
+            client_list.append(DZOK_Client(args, model, i, 0, comm_rref,candidate_seeds))
+    if args.opt_strategy == 'CHOCO':
+        for i in range(args.num_clients):
+            client_list.append(CHOCO_Client(args, model, i, 0, comm_rref,args.sparsification_r))
+    if args.opt_strategy == 'CHOCO_DZO':
+        for i in range(args.num_clients):
+            client_list.append(CHOCO_DZO_Client(args, model, i, 0, comm_rref,args.sparsification_r))
+
+
+
     
     for client, dataloader in zip(client_list, dataloaders):
         client.setup_trainloader(dataloader)
         
-        
-    criterion = nn.BCELoss()  # 이진 교차 엔트로피 손실 함수
+    if args.model == "logistic_regression":
+        criterion = nn.BCELoss()  # 이진 교차 엔트로피 손실 함수
+    elif args.model == "CNN_MNIST":
+        criterion = nn.CrossEntropyLoss()
     ## 각 client에 dataloader 할당.
     ## init train
     num_epoch = 0
     num_batch = 0
     total_comm = 0
-    while(num_batch < 100):
+    while(num_batch < args.max_epoch):
+        ## train
+        
+        # local step
         for client in client_list:
             client.local_iteration()
-        communicator.all_reduce()
-        for client in client_list:
-            num_epoch, num_batch, total_comm = client.gossip_result_update()
-    
+            
+            
+            
+        # gossip step
+        for _ in range(args.gossip_iter):
+            for client in client_list:
+                client.communicate()
+            communicator.all_reduce()
+            for client in client_list:
+                num_epoch, num_batch, total_comm = client.gossip_result_update()
+        
+        
+        ## MGS and reset seed pool
+        if args.opt_strategy == 'DZOPK' and num_batch % args.Period == (args.Period -1):
+            candidate_seeds = torch.randint(low=1, high=2147483647, size=(args.K,), dtype=torch.int32)
+            for _ in range(args.Period * args.gossip_iter):
+                communicator.all_reduce()
+                for client in client_list:
+                     num_epoch, num_batch, total_comm =  client.DZOK_MGS_comm_update()
+            
+            for client in client_list:
+                client.DZOK_new_init_model(candidate_seeds)
+                    
+        
+        ## validation    
         if num_batch % 5 == 0 :
-            with torch.no_grad():
-                avg_model_dict = communicator.make_avg_model()
-                avgmodel = copy.deepcopy(model)
-                avgmodel = avgmodel.to(device)
-                for name, param in avgmodel.named_parameters():
+            avg_model_dict = communicator.make_avg_model()
+            avgmodel = copy.deepcopy(model)
+            avgmodel = avgmodel.to(device)
+            for name, param in avgmodel.named_parameters():
+                with torch.no_grad():
                     param.copy_(avg_model_dict[name])
-                total_loss = 0.0
+            '''
+            elif args.opt_strategy == 'DZOK':
+                avgmodel = communicator.make_avg_model()
+                avgmodel = avgmodel.to(device)
+            '''
+            total_train_loss = 0.0
+            with torch.no_grad():
                 for A, y in train_dataloader:
-                    A, y = A.to(device).float(), y.to(device).float()
+                    A, y = A.to(device), y.to(device)
                     outputs = avgmodel(A)  # 전체 데이터를 모델에 입력
                     loss = criterion(outputs, y)  # 손실 계산
-                    total_loss += loss.item()
-                logging.info(f"avg model loss : {total_loss/len(train_dataloader)}, at epoch{num_epoch} iter {num_batch}")
+                    total_train_loss += loss.item()
                 
-
+                    
+                correct = 0
+                total = 0
+                total_validation_loss = 0 
+                for A, y in validation_dataloader:
+                    A, y = A.to(device), y.to(device)
+                    outputs = avgmodel(A)
+                    loss = criterion(outputs, y)
+                    total_validation_loss += loss.item()
+                    _, predicted = torch.max(outputs, 1)
+                    total += y.size(0)
+                    correct += (predicted == y).sum().item()
+                    
+                consensus_distance = communicator.consensus_distance()
+                
+                
+                wandb.log({"Avgmodel Training loss": total_train_loss/len(train_dataloader), "consensus distance": consensus_distance, "total_comm":int(total_comm), "iteration":num_batch, "Avgmodel Validation loss":total_validation_loss/len(validation_dataloader), "accuracy":correct/total})
+                logging.info(f"avg model loss : {total_train_loss/len(train_dataloader)}, at epoch {num_epoch} iter {num_batch}")
+                if (math.isnan(total_train_loss)):
+                    return 
 def run_worker(rank, world_size, args):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = args.master_port
