@@ -18,12 +18,15 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split, TensorDataset
 
 from client.client import DZO_Client, DSGD_Communicator, DZOK_Communicator, DSGD_Client, DZOK_Client, CHOCO_Client, CHOCO_Communicator, CHOCO_DZO_Client
-
+from client.Fgossip import DZO_FLOODgossip_Client, DZO_FLOODgossip_Communicator
 
 from util.arguments import get_args
 from util.setup_seed import setup_seed
 from model.logistic_regression import LogisticRegression
 from model.cnn_mnist import CNN_MNIST
+from model.resnet_s import resnet20
+from model.resnet import resnet18
+
 from torchvision import datasets, transforms
 
 logging.basicConfig(level=logging.DEBUG)
@@ -58,13 +61,60 @@ def main_(world_size, args):
         model = LogisticRegression(784)
     elif args.model == "CNN_MNIST":
         model = CNN_MNIST()
+    elif args.model == "Resnet20":
+        model = resnet20()
+    elif args.model == "Resnet18":
+        model = resnet18()
+        model.fc = nn.Linear(model.fc.in_features, 100)
+
     #candidate_seeds = np.random.randint(1, 2147483647, args.K)
+
+
     candidate_seeds = torch.randint(low=1, high=2147483647, size=(args.K,), dtype=torch.int32)
     
-    transform = transforms.Compose([transforms.ToTensor()])
-    train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-    validation_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+    if args.model == "CNN_MNIST":
+        transform = transforms.Compose([transforms.ToTensor()])
+        train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+        validation_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+    elif args.model == "Resnet20":
+        mean = [0.4914, 0.4822, 0.4465]
+        std = [0.2471, 0.2435, 0.2616]
+        train_transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        test_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        train_dataset = datasets.CIFAR10(root ='./data', train = True, download = True, transform = train_transform)
+        validation_dataset = datasets.CIFAR10(root = './data', train = False, download = True, transform = test_transform)
+    elif args.model == "Resnet18":
+        train_data = datasets.CIFAR100('./data', train=True, download=True)
 
+        # Stick all the images together to form a 1600000 X 32 X 3 array
+        x = np.concatenate([np.asarray(train_data[i][0]) for i in range(len(train_data))])
+
+        # calculate the mean and std along the (0, 1) axes
+        mean = np.mean(x, axis=(0, 1))/255
+        std = np.std(x, axis=(0, 1))/255
+        # the the mean and std
+        mean=mean.tolist()
+        std=std.tolist()
+        train_transform = transforms.Compose([transforms.RandomCrop(32, padding=4,padding_mode='reflect'), 
+                                transforms.RandomHorizontalFlip(), 
+                                transforms.ToTensor(), 
+                                transforms.Normalize(mean,std,inplace=True)])
+        test_transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean,std)])
+
+        train_dataset = datasets.CIFAR100(root ='./data', train = True, download = True, transform = train_transform)
+        validation_dataset = datasets.CIFAR100(root = './data', train = False, download = True, transform = test_transform)
+        ## https://www.kaggle.com/code/yiweiwangau/cifar-100-resnet-pytorch-75-17-accuracy
+        
+    
+    
     def binary_classification_label_transform(label):
         return 0 if label < 5 else 1
     
@@ -79,11 +129,15 @@ def main_(world_size, args):
 
     n = args.num_clients
     batch_size = args.batch_size
-    lengths = [len(dataset) // n] * n  # 
-    lengths[-1] += len(dataset) % n  # 
+    
+    lengths = [len(dataset) // n] * n  #
+    lengths[-1] += len(dataset) % n  #
+    
     generator = torch.Generator().manual_seed(42)
     subsets = random_split(dataset, lengths, generator=generator)
+    
     dataloaders = [DataLoader(subset, batch_size=batch_size, shuffle=False) for subset in subsets]
+    
     train_dataloader = DataLoader(dataset, batch_size=128, shuffle=False)
     validation_dataloader = DataLoader(validation_dataset, batch_size=128, shuffle=False)
 
@@ -96,6 +150,8 @@ def main_(world_size, args):
         communicator = DZOK_Communicator(args, model, candidate_seeds)
     elif args.opt_strategy == 'CHOCO' or args.opt_strategy == 'CHOCO_DZO':
         communicator = CHOCO_Communicator(args, args.consensus_ss)
+    elif args.opt_strategy == 'FLOOD':
+        communicator = DZO_FLOODgossip_Communicator(args)
 
     comm_rref = rpc.RRef(communicator)
 
@@ -116,6 +172,10 @@ def main_(world_size, args):
     if args.opt_strategy == 'CHOCO_DZO':
         for i in range(args.num_clients):
             client_list.append(CHOCO_DZO_Client(args, model, i, 0, comm_rref,args.sparsification_r))
+    if args.opt_strategy == 'FLOOD':
+        for i in range(args.num_clients):
+            client_list.append(DZO_FLOODgossip_Client(args, model, i, 0, comm_rref))
+
 
 
 
@@ -125,7 +185,7 @@ def main_(world_size, args):
         
     if args.model == "logistic_regression":
         criterion = nn.BCELoss()  # 이진 교차 엔트로피 손실 함수
-    elif args.model == "CNN_MNIST":
+    else:
         criterion = nn.CrossEntropyLoss()
     ## 각 client에 dataloader 할당.
     ## init train
@@ -148,8 +208,9 @@ def main_(world_size, args):
             communicator.all_reduce()
             for client in client_list:
                 num_epoch, num_batch, total_comm = client.gossip_result_update()
-        
-        
+        if args.opt_strategy == "FLOOD":
+            total_comm = communicator.get_communication()
+        """
         ## MGS and reset seed pool
         if args.opt_strategy == 'DZOPK' and num_batch % args.Period == (args.Period -1):
             candidate_seeds = torch.randint(low=1, high=2147483647, size=(args.K,), dtype=torch.int32)
@@ -160,10 +221,10 @@ def main_(world_size, args):
             
             for client in client_list:
                 client.DZOK_new_init_model(candidate_seeds)
-                    
+        """
         
         ## validation    
-        if num_batch % 5 == 0 :
+        if num_batch % 200 == 0 :
             avg_model_dict = communicator.make_avg_model()
             avgmodel = copy.deepcopy(model)
             avgmodel = avgmodel.to(device)
@@ -182,8 +243,6 @@ def main_(world_size, args):
                     outputs = avgmodel(A)  # 전체 데이터를 모델에 입력
                     loss = criterion(outputs, y)  # 손실 계산
                     total_train_loss += loss.item()
-                
-                    
                 correct = 0
                 total = 0
                 total_validation_loss = 0 
@@ -196,11 +255,10 @@ def main_(world_size, args):
                     total += y.size(0)
                     correct += (predicted == y).sum().item()
                     
-                consensus_distance = communicator.consensus_distance()
-                
-                
+                consensus_distance = communicator.consensus_distance()            
                 wandb.log({"Avgmodel Training loss": total_train_loss/len(train_dataloader), "consensus distance": consensus_distance, "total_comm":int(total_comm), "iteration":num_batch, "Avgmodel Validation loss":total_validation_loss/len(validation_dataloader), "accuracy":correct/total})
                 logging.info(f"avg model loss : {total_train_loss/len(train_dataloader)}, at epoch {num_epoch} iter {num_batch}")
+    
                 if (math.isnan(total_train_loss)):
                     return 
 def run_worker(rank, world_size, args):

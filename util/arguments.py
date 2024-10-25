@@ -22,7 +22,7 @@ def get_args():
     parser.add_argument("--batch_size", type=int, default=64)
 
     parser.add_argument("--opt_strategy", type=str, default='DSGD',
-                                            choices=['DSGD','DZOK','CHOCO', 'DZO', 'CHOCO_DZO', 'DZOPK'])
+                                            choices=['DSGD','DZOK','CHOCO', 'DZO', 'CHOCO_DZO', 'DZOPK', 'FLOOD'])
     parser.add_argument("--topology", type=str, default='ring',
                                             choices=['ring','meshgrid','all'])
     
@@ -54,7 +54,7 @@ def get_args():
     parser.add_argument('--sparsification_r', type=float, default=0.9, help="dropout rate of sparsificaiton")
     
     
-    parser.add_argument('--model', type=str, default='logistic_regression', choices=['CNN_MNIST', 'logistic_regression'])
+    parser.add_argument('--model', type=str, default='logistic_regression', choices=['CNN_MNIST', 'logistic_regression', 'Resnet20', 'Resnet18'])
 
 
     # multi gpu

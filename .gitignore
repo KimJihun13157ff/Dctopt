@@ -1,0 +1,6 @@
+data/
+*.pth
+wandb/
+*.log
+__pycache__/
+*.tar.gz

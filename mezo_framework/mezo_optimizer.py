@@ -26,6 +26,9 @@ import torch
 import numpy as np
 
 import torch.nn as nn
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
 
 class MeZOFramework(object):
     def __init__(self, model, args, lr, candidate_seeds):
@@ -55,7 +58,7 @@ class MeZOFramework(object):
             if self.candidate_seeds is not None:
                 self.zo_random_seed = int(np.random.choice(self.candidate_seeds, 1)[0])
             else:
-                self.zo_random_seed = np.random.randint(1, 100000000000)
+                self.zo_random_seed = torch.randint(low=1, high=2147483647, size=(1,), dtype=torch.int32).item()
             self._zo_perturb_parameters(scaling_factor=1)
             logits1, loss1 = self.zo_forward(batch)
 
@@ -90,8 +93,7 @@ class MeZOFramework(object):
             self.projected_grad = projected_grad
             self.zo_update()
             if local_seed_pool is not None:
-                local_seed_pool[self.zo_random_seed] += self.projected_grad
-        
+                local_seed_pool[self.zo_random_seed] = local_seed_pool.get(self.zo_random_seed, 0) + self.projected_grad
         return logits1, loss1
 
     def _zo_perturb_parameters(self, scaling_factor=1):
@@ -119,7 +121,7 @@ class MeZOFramework(object):
         #loss = outputs.loss
         if self.args.model == "logistic_regression":
             criterion = nn.BCELoss()
-        elif self.args.model == "CNN_MNIST":
+        else:
             criterion = nn.CrossEntropyLoss()
 
         device = torch.device(f'cuda:0')

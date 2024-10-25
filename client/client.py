@@ -97,7 +97,7 @@ class CHOCO_Client(Client):
         super().__init__(args, model, idx, device, comm_rref)
         if args.model == "logistic_regression":
             self.criterion = nn.BCELoss()
-        elif args.model == "CNN_MNIST":
+        else:
             self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.SGD(self.model.parameters(), lr=self.args.lr ,weight_decay= self.args.weight_decay)
         self.x_hat = {name: torch.zeros_like(param).to(self.device) for name, param in model.named_parameters()}
@@ -129,7 +129,7 @@ class CHOCO_Client(Client):
             # update x_hat
             self.x_hat[name] += model_dict[name]
             model_dict[name]= model_dict[name].cpu()
-        self.comm_rref.rpc_sync().update_data(self.idx, self.model.cpu().state_dict() ,model_dict)
+        self.comm_rref.rpc_sync().update_data(self.idx, {name: param for name, param in self.model.cpu().named_parameters()} ,model_dict)
 
         #1.calculate x-xhat and compress 
     
@@ -190,7 +190,7 @@ class CHOCO_DZO_Client(Client):
             # update x_hat
             self.x_hat[name] += model_dict[name]
             model_dict[name]= model_dict[name].cpu()
-        self.comm_rref.rpc_sync().update_data(self.idx, self.model.cpu().state_dict() ,model_dict)
+        self.comm_rref.rpc_sync().update_data(self.idx, {name: param for name, param in self.model.cpu().named_parameters()} ,model_dict)
 
         #1.calculate x-xhat and compress 
     
@@ -226,7 +226,7 @@ class DSGD_Client(Client):
         super().__init__(args, model, idx, device, comm_rref)
         if args.model == "logistic_regression":
             self.criterion = nn.BCELoss()
-        elif args.model == "CNN_MNIST":
+        else:
             self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.SGD(self.model.parameters(), lr=self.args.lr ,weight_decay= self.args.weight_decay)
     def local_iteration(self):
@@ -238,6 +238,7 @@ class DSGD_Client(Client):
     def DSGD_local_iter(self):
         
         self.model = self.model.to(self.device)
+        self.model.train()
         for _ in range(self.args.local_iter):
             try:
                 batch = next(self.train_iterator)
@@ -258,14 +259,15 @@ class DSGD_Client(Client):
             logging.info(f"client idx : {self.idx} loss : {loss.item()} total batch {self.total_batch}, total epoch :{self.total_epoch} total_comm : {self.total_communication}")        
             
     def DSGD_communicate(self):
-        self.comm_rref.rpc_sync().update_data(self.idx, self.model.cpu().state_dict())
+        self.model.eval()
+        self.comm_rref.rpc_sync().update_data(self.idx, {name: param for name, param in self.model.cpu().named_parameters()})
         self.total_communication += sum(param.numel() * param.element_size() for param in self.model.parameters())
 
     def gossip_result_update(self):
         with torch.no_grad():
             gossip_result = self.comm_rref.rpc_sync().get_data(self.idx)
             for name, param in self.model.named_parameters():
-                param.copy_(gossip_result[name])
+                    param.copy_(gossip_result[name])
         return self.total_epoch, self.total_batch, self.total_communication
 
 
@@ -298,12 +300,12 @@ class DZO_Client(Client):
             logits, loss = framework.zo_step(batch)
             if (not torch.isnan(loss)) and (loss != 0.0):
                 loss_total_train += loss
-        wandb.log({f"model{self.idx} Training loss": loss_total_train/self.args.local_iter})
+        #wandb.log({f"model{self.idx} Training loss": loss_total_train/self.args.local_iter})
         if self.idx == 0:
             logging.info(f"client idx : {self.idx} loss : {loss} total batch {self.total_batch}, total epoch :{self.total_epoch} total_comm : {self.total_communication}")
 
     def DZO_communicate(self):
-        self.comm_rref.rpc_sync().update_data(self.idx, self.model.cpu().state_dict())
+        self.comm_rref.rpc_sync().update_data(self.idx, {name: param for name, param in self.model.cpu().named_parameters()})
         self.total_communication += sum(param.numel() * param.element_size() for param in self.model.parameters())
     def gossip_result_update(self):
         with torch.no_grad():
@@ -358,7 +360,7 @@ class DZOK_Client(Client):
                     total_size += torch.tensor(key, dtype=torch.int32).element_size()   # 각 키의 메모리 크기 추가
                     total_size += value.element_size()  # 각 값의 메모리 크기 추가
             return total_size
-        self.comm_rref.rpc_sync().update_data(self.idx, self.total_seed_pool, self.model.cpu().state_dict())
+        self.comm_rref.rpc_sync().update_data(self.idx, self.total_seed_pool, {name: param for name, param in self.model.cpu().named_parameters()})
         self.total_communication += get_dict_size(self.total_seed_pool)
     def gossip_result_update(self):
         self.total_seed_pool = self.comm_rref.rpc_sync().get_data(self.idx)
@@ -422,12 +424,11 @@ class DZOK_Communicator(object):
         for i in range(self.args.num_clients):
             for key in avg_model_dict.keys():
                 consensus_distance += torch.norm(avg_model_dict[key] - self.model_dict[i][key]) ** 2
+        consensus_distance /= self.args.num_clients        
         return consensus_distance ** 1/2
     
     def make_avg_model(self):
-        avg_state_dict = copy.deepcopy(self.model_dict[0])
-        for key in avg_state_dict.keys():
-            avg_state_dict[key].zero_()
+        avg_state_dict = {key: torch.zeros_like(tensor) for key, tensor in self.data[0].items()}
             
         for state_dict in self.model_dict:
             for key in state_dict.keys():
@@ -484,12 +485,11 @@ class DSGD_Communicator(object):
         for i in range(self.args.num_clients):
             for key in avg_model_dict.keys():
                 consensus_distance += torch.norm(avg_model_dict[key] - self.data[i][key]) ** 2
+        consensus_distance /= self.args.num_clients        
         return consensus_distance ** 1/2
     
     def make_avg_model(self):
-        avg_state_dict = copy.deepcopy(self.data[0])
-        for key in avg_state_dict.keys():
-            avg_state_dict[key].zero_()
+        avg_state_dict = {key: torch.zeros_like(tensor) for key, tensor in self.data[0].items()}
         for state_dict in self.data:
             for key in state_dict.keys():
                 avg_state_dict[key] += state_dict[key]
@@ -499,12 +499,11 @@ class DSGD_Communicator(object):
         return avg_state_dict
         
     def all_reduce(self):
-        new_dict_list = [{key: torch.zeros_like(value) for key, value in d.items()}for d in self.data]
+        new_dict_list = [{key: torch.zeros_like(value) for key, value in d.items()} for d in self.data]
         for i in range(self.args.num_clients):
             for j in range(self.args.num_clients):
                 for key in new_dict_list[i].keys():
-                    new_dict_list[i][key] += self.data[j][key] * self.m[j][i]
-        
+                    new_dict_list[i][key] += self.data[j][key] * self.m[j][i]        
         self.data = new_dict_list
     
     def update_data(self, idx, data):
@@ -530,13 +529,11 @@ class CHOCO_Communicator(object):
         for i in range(self.args.num_clients):
             for key in avg_model_dict.keys():
                 consensus_distance += torch.norm(avg_model_dict[key] - self.x[i][key]) ** 2
+        consensus_distance /= self.args.num_clients        
         return consensus_distance ** 1/2
 
     def make_avg_model(self):
-        avg_state_dict = copy.deepcopy(self.x[0])
-        for key in avg_state_dict.keys():
-            avg_state_dict[key].zero_()
-    
+        avg_state_dict = {key: torch.zeros_like(tensor) for key, tensor in self.x[0].items()}
         for state_dict in self.x:
             for key in state_dict.keys():
                 avg_state_dict[key] += state_dict[key]
