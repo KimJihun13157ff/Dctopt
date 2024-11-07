@@ -26,6 +26,7 @@ from model.logistic_regression import LogisticRegression
 from model.cnn_mnist import CNN_MNIST
 from model.resnet_s import resnet20
 from model.resnet import resnet18
+from rpc_function import worker_set_up, worker_gossip_result_update, worker_local_step, worker_communicate, worker_upload_model
 
 from torchvision import datasets, transforms
 
@@ -136,14 +137,12 @@ def main_(world_size, args):
     generator = torch.Generator().manual_seed(42)
     subsets = random_split(dataset, lengths, generator=generator)
     
-    dataloaders = [DataLoader(subset, batch_size=batch_size, shuffle=False) for subset in subsets]
     
     train_dataloader = DataLoader(dataset, batch_size=128, shuffle=False)
     validation_dataloader = DataLoader(validation_dataset, batch_size=128, shuffle=False)
 
     
     ### communicator
-    
     if args.opt_strategy == 'DSGD' or args.opt_strategy == "DZO":
         communicator = DSGD_Communicator(args)
     elif args.opt_strategy == 'DZOK' or args.opt_strategy == 'DZOPK':
@@ -152,10 +151,9 @@ def main_(world_size, args):
         communicator = CHOCO_Communicator(args, args.consensus_ss)
     elif args.opt_strategy == 'FLOOD':
         communicator = DZO_FLOODgossip_Communicator(args)
-
     comm_rref = rpc.RRef(communicator)
 
-    ## client
+## client
     client_list = []
     if args.opt_strategy == 'DSGD':
         for i in range(args.num_clients):
@@ -176,12 +174,20 @@ def main_(world_size, args):
         for i in range(args.num_clients):
             client_list.append(DZO_FLOODgossip_Client(args, model, i, 0, comm_rref))
 
+    if world_size == 1:
+        dataloaders = [DataLoader(subset, batch_size=batch_size, shuffle=False) for subset in subsets]
+        for client, dataloader in zip(client_list, dataloaders):
+            client.setup_trainloader(dataloader)
+    else: # client setup
+        futures =[]
+        n_worker = world_size - 1
+        assert args.num_clients % n_worker == 0
+        for i in range(n_worker):
+            start = int(args.num_clients / n_worker)* i
+            end =  int(args.num_clients / n_worker)  * (i + 1)
+            futures.append(rpc.rpc_async(f"gpu_{i}", worker_set_up ,args=(args, i, client_list[start:end], subsets[start: end] )))
+        [fut.wait() for fut in futures]
 
-
-
-    
-    for client, dataloader in zip(client_list, dataloaders):
-        client.setup_trainloader(dataloader)
         
     if args.model == "logistic_regression":
         criterion = nn.BCELoss()  # 이진 교차 엔트로피 손실 함수
@@ -196,67 +202,86 @@ def main_(world_size, args):
         ## train
         
         # local step
-        for client in client_list:
-            client.local_iteration()
-            
-            
-            
-        # gossip step
+        if world_size == 1:
+            for client in client_list:
+                client.local_iteration()
+        else:
+            futures = []
+            for i in range(n_worker):
+                futures.append(rpc.rpc_async(f"gpu_{i}", worker_local_step))
+            [fut.wait() for fut in futures]
+        # communication step
         for _ in range(args.gossip_iter):
-            for client in client_list:
-                client.communicate()
-            communicator.all_reduce()
-            for client in client_list:
-                num_epoch, num_batch, total_comm = client.gossip_result_update()
-        if args.opt_strategy == "FLOOD":
-            total_comm = communicator.get_communication()
-        """
-        ## MGS and reset seed pool
-        if args.opt_strategy == 'DZOPK' and num_batch % args.Period == (args.Period -1):
-            candidate_seeds = torch.randint(low=1, high=2147483647, size=(args.K,), dtype=torch.int32)
-            for _ in range(args.Period * args.gossip_iter):
-                communicator.all_reduce()
+            ## send model to communicator
+            if world_size == 1:
                 for client in client_list:
-                     num_epoch, num_batch, total_comm =  client.DZOK_MGS_comm_update()
-            
-            for client in client_list:
-                client.DZOK_new_init_model(candidate_seeds)
-        """
-        
+                    client.communicate()
+            else:
+                futures = []
+                for i in range(n_worker):
+                    futures.append(rpc.rpc_async(f"gpu_{i}", worker_communicate))
+                [fut.wait() for fut in futures]
+            ## model all reduce
+            communicator.all_reduce()
+            ## recieve communicate  result and update model
+            if world_size == 1:
+                for client in client_list:
+                    num_epoch, num_batch, total_comm = client.gossip_result_update()
+            else:
+                futures = []
+                for i in range(n_worker):
+                    futures.append(rpc.rpc_async(f"gpu_{i}", worker_gossip_result_update))
+                result = [fut.wait() for fut in futures]
+                num_epoch, num_batch, total_comm = result[0]
+                
+        if args.opt_strategy == "FLOOD":
+            total_comm = communicator.get_communication()        
         ## validation    
-        if num_batch % 200 == 0 :
+        if num_batch % 50 == 0 :
+            
+            if args.opt_strategy == "FLOOD" or args.opt_strategy == "DZOK":
+                if world_size == 1:
+                    for client in client_list:
+                        client.upload_model()
+                else:
+                    futures = []
+                    for i in range(n_worker):
+                        futures.append(rpc.rpc_async(f"gpu_{i}", worker_upload_model))
+                    [fut.wait() for fut in futures]
+
             avg_model_dict = communicator.make_avg_model()
             avgmodel = copy.deepcopy(model)
             avgmodel = avgmodel.to(device)
             for name, param in avgmodel.named_parameters():
                 with torch.no_grad():
                     param.copy_(avg_model_dict[name])
-            '''
-            elif args.opt_strategy == 'DZOK':
-                avgmodel = communicator.make_avg_model()
-                avgmodel = avgmodel.to(device)
-            '''
             total_train_loss = 0.0
             with torch.no_grad():
+                correct = 0
+                total = 0
                 for A, y in train_dataloader:
                     A, y = A.to(device), y.to(device)
                     outputs = avgmodel(A)  # 전체 데이터를 모델에 입력
                     loss = criterion(outputs, y)  # 손실 계산
                     total_train_loss += loss.item()
-                correct = 0
-                total = 0
-                total_validation_loss = 0 
+                    _, predicted = torch.max(outputs, 1)
+                    total += y.size(0)
+                    correct += (predicted == y).sum().item()
+                val_correct = 0
+                val_total = 0
+                total_validation_loss = 0
+                
                 for A, y in validation_dataloader:
                     A, y = A.to(device), y.to(device)
                     outputs = avgmodel(A)
                     loss = criterion(outputs, y)
                     total_validation_loss += loss.item()
                     _, predicted = torch.max(outputs, 1)
-                    total += y.size(0)
-                    correct += (predicted == y).sum().item()
+                    val_total += y.size(0)
+                    val_correct += (predicted == y).sum().item()
                     
                 consensus_distance = communicator.consensus_distance()            
-                wandb.log({"Avgmodel Training loss": total_train_loss/len(train_dataloader), "consensus distance": consensus_distance, "total_comm":int(total_comm), "iteration":num_batch, "Avgmodel Validation loss":total_validation_loss/len(validation_dataloader), "accuracy":correct/total})
+                wandb.log({"Avgmodel Training loss": total_train_loss/len(train_dataloader), "consensus distance": consensus_distance, "total_comm":int(total_comm), "iteration":num_batch, "Avgmodel Validation loss":total_validation_loss/len(validation_dataloader), "train_accuracy":correct/total, "validation_accuracy":val_correct/val_total})
                 logging.info(f"avg model loss : {total_train_loss/len(train_dataloader)}, at epoch {num_epoch} iter {num_batch}")
     
                 if (math.isnan(total_train_loss)):

@@ -124,7 +124,7 @@ class MeZOFramework(object):
         else:
             criterion = nn.CrossEntropyLoss()
 
-        device = torch.device(f'cuda:0')
+        device = next(self.model.parameters()).device
         data, target = batch[0].to(device).float(), batch[1].to(device)
         outputs = self.model(data)
         loss = criterion(outputs, target)

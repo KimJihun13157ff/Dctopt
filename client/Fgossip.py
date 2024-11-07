@@ -177,13 +177,17 @@ class DZO_FLOODgossip_Client(Client):
         packed_items = []
         for msg in self.current_msgs:
             packed_items.append(msg.pack())
-        self.comm_rref.rpc_sync().update_data(self.idx, packed_items, {name: param for name, param in self.model.cpu().named_parameters()})
+        self.comm_rref.rpc_sync().update_data(self.idx, packed_items)
         
         '''
         for msg in self.current_msgs:
             logging.info(f"client {self.idx} send update : {msg.get_data()}")
         '''
         self.current_msgs = []
+        
+    def upload_model(self):
+        self.comm_rref.rpc_sync().update_data(self.idx,{name: param for name, param in self.model.cpu().named_parameters()})
+
 
 
 
@@ -286,10 +290,11 @@ class DZO_FLOODgossip_Communicator(object):
                         self.total_comm += msg.get_size()
         self.data = updated_data
             
-    def update_data(self, idx, packs, model_dict):
+    def update_data(self, idx, packs):
         self.data[idx] = []
         for packed_bytes in packs:
             self.data[idx].append(message.from_packed_bytes(packed_bytes, self.args.num_clients))
+    def update_model_dict(self, idx, model_dict):
         self.model_dict[idx] = model_dict
     
     def get_data(self, idx):

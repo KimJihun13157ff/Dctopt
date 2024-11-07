@@ -22,10 +22,10 @@ echo "Start Training"
  #### DCHOCO, same as choco.
 
   python main.py \
- --gpu_ids 0 --master_port 29400 --model Resnet20\
- --batch_size 128 \
+ --gpu_ids 0 --master_port 29400 --model CNN_MNIST\
+ --batch_size 64 \
  --topology ring \
- --opt_strategy FLOOD --zo_normalized \
+ --opt_strategy FLOOD \
  --num_client 32 --npert 10 \
- --lr 0.1 --max_epoch 5000 --weight_decay 0 --grad_clip 0\
- --K 723 --local_iter 1 --gossip_iter 1  --seed 42 --sparsification_r 0.99825 --consensus_ss 0 --project_name Resnet20_32c
+ --lr 0.01 --max_epoch 1000 --weight_decay 0 --grad_clip 0\
+ --K 723 --local_iter 1 --gossip_iter 1  --seed 42 --sparsification_r 0.99825 --consensus_ss 0 --project_name 1104

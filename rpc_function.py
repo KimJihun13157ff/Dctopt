@@ -43,5 +43,9 @@ def worker_gossip_result_update():
         num_epoch, num_batch, total_comm = client.gossip_result_update()
     return num_epoch, num_batch, total_comm
 
+def worker_upload_model():
+    for client in global_vars.Client_list:
+        client.update_model_dict()
+
 def eval_avg_model(seed_pool, eval_matric, cur_round):
     dosomething = 0

@@ -17,6 +17,8 @@ import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 
+from client.sam import SAM
+
 logging.basicConfig(level=logging.DEBUG)
 
 #from util.randpro import RandProReducer
@@ -75,6 +77,10 @@ class Client():
     def setup_trainloader(self, train_loader):
         self.train_loader = train_loader
         self.train_iterator = iter(self.train_loader)
+    def setup_device(self, device):
+        self.device = torch.device(f'cuda:{device}')
+        logging.info(f"client [{self.idx}] use [{self.device}]")        
+        
         
     def local_iteration(self):
         pass
@@ -228,7 +234,9 @@ class DSGD_Client(Client):
             self.criterion = nn.BCELoss()
         else:
             self.criterion = nn.CrossEntropyLoss()
+        #self.optimizer = optim.SGD(self.model.parameters(), lr=self.args.lr ,weight_decay= self.args.weight_decay)
         self.optimizer = optim.SGD(self.model.parameters(), lr=self.args.lr ,weight_decay= self.args.weight_decay)
+        #self.sam_optimizer = SAM(self.optimizer, self.model, 0.05)
     def local_iteration(self):
         self.total_round += 1
         self.DSGD_local_iter()
@@ -252,9 +260,16 @@ class DSGD_Client(Client):
             self.optimizer.zero_grad()
             outputs = self.model(data)
             loss = self.criterion(outputs, target)
+
             loss.backward()
             self.optimizer.step()
-        
+            '''
+            loss.backward()
+            self.sam_optimizer.ascent_step()
+            self.optimizer.zero_grad()
+            self.criterion(self.model(data),target).backward()
+            self.sam_optimizer.descent_step()
+            '''
         if self.idx == 0:
             logging.info(f"client idx : {self.idx} loss : {loss.item()} total batch {self.total_batch}, total epoch :{self.total_epoch} total_comm : {self.total_communication}")        
             
@@ -360,8 +375,12 @@ class DZOK_Client(Client):
                     total_size += torch.tensor(key, dtype=torch.int32).element_size()   # 각 키의 메모리 크기 추가
                     total_size += value.element_size()  # 각 값의 메모리 크기 추가
             return total_size
-        self.comm_rref.rpc_sync().update_data(self.idx, self.total_seed_pool, {name: param for name, param in self.model.cpu().named_parameters()})
+        self.comm_rref.rpc_sync().update_data(self.idx, self.total_seed_pool)
         self.total_communication += get_dict_size(self.total_seed_pool)
+        
+    def upload_model(self):
+        self.comm_rref.rpc_sync().update_data(self.idx,{name: param for name, param in self.model.cpu().named_parameters()})
+
     def gossip_result_update(self):
         self.total_seed_pool = self.comm_rref.rpc_sync().get_data(self.idx)
         self.model = copy.deepcopy(self.pt_model)
@@ -402,6 +421,9 @@ class BasicCommunicator(object):
         pass
     
     def update_data(self, idx, data):
+        pass
+    
+    def update_model_dict(self, idx, model_state_dict):
         pass
     
     def get_data(self, idx):
@@ -464,9 +486,12 @@ class DZOK_Communicator(object):
                     new_dict_list[i][key] += self.data[j][key] * self.m[j][i]
         self.data = new_dict_list
             
-    def update_data(self, idx, data, model_dict):
+    def update_data(self, idx, data):
         self.data[idx] = data
+    
+    def update_model_dict(self, idx, model_dict):
         self.model_dict[idx] = model_dict
+
     
     def get_data(self, idx):
         return self.data[idx]
@@ -499,7 +524,7 @@ class DSGD_Communicator(object):
         return avg_state_dict
         
     def all_reduce(self):
-        new_dict_list = [{key: torch.zeros_like(value) for key, value in d.items()} for d in self.data]
+        new_dict_list = [{key: torch.zeros_like(value) for key, value in d.items()} for d in self.data]        
         for i in range(self.args.num_clients):
             for j in range(self.args.num_clients):
                 for key in new_dict_list[i].keys():
