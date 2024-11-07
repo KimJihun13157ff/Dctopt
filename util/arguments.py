@@ -54,7 +54,14 @@ def get_args():
     parser.add_argument('--sparsification_r', type=float, default=0.9, help="dropout rate of sparsificaiton")
     
     
-    parser.add_argument('--model', type=str, default='logistic_regression', choices=['CNN_MNIST', 'logistic_regression', 'Resnet20', 'Resnet18'])
+    # for llm
+    parser.add_argument('--dataset', type=str, default='instruct', choices=['instruct', 'dolly'])
+    parser.add_argument('--max_length', type=int, default=1024, help='the max number of tokens of a data instance')
+    parser.add_argument('--use_prompts', default=True, help='if `true`, the prompt template from alpaca is adopted')
+
+    # Model
+    parser.add_argument('--model', type=str, default='datajuicer/LLaMA-1B-dj-refine-150B')
+
 
 
     # multi gpu
