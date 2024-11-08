@@ -17,6 +17,10 @@ import torch.nn as nn
 
 from torch.utils.data import DataLoader, random_split, TensorDataset
 
+from utils_data.default_tokens import DefaultToken
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from client.client import DZO_Client, DSGD_Communicator, DZOK_Communicator, DSGD_Client, DZOK_Client, CHOCO_Client, CHOCO_Communicator, CHOCO_DZO_Client
 from client.Fgossip import DZO_FLOODgossip_Client, DZO_FLOODgossip_Communicator
 
@@ -58,6 +62,10 @@ def main_(world_size, args):
     logging.info(args)
     print(args)
 
+    
+    # load model.    
+    model = AutoModelForCausalLM.from_pretrained(args.model, device_map='cpu', torch_dtype=torch.float16, trust_remote_code=True)
+    '''
     if args.model == "logistic_regression":
         model = LogisticRegression(784)
     elif args.model == "CNN_MNIST":
@@ -67,12 +75,16 @@ def main_(world_size, args):
     elif args.model == "Resnet18":
         model = resnet18()
         model.fc = nn.Linear(model.fc.in_features, 100)
-
+    '''
     #candidate_seeds = np.random.randint(1, 2147483647, args.K)
 
 
     candidate_seeds = torch.randint(low=1, high=2147483647, size=(args.K,), dtype=torch.int32)
+    # load dataset
     
+    list_train_dataset, eval_dataset, tokenizer = get_loaders(args)
+    
+    '''
     if args.model == "CNN_MNIST":
         transform = transforms.Compose([transforms.ToTensor()])
         train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
@@ -113,7 +125,7 @@ def main_(world_size, args):
         train_dataset = datasets.CIFAR100(root ='./data', train = True, download = True, transform = train_transform)
         validation_dataset = datasets.CIFAR100(root = './data', train = False, download = True, transform = test_transform)
         ## https://www.kaggle.com/code/yiweiwangau/cifar-100-resnet-pytorch-75-17-accuracy
-        
+    
     
     
     def binary_classification_label_transform(label):
@@ -123,25 +135,14 @@ def main_(world_size, args):
     if args.model == "logistic_regression":
         train_dataset.targets = torch.tensor([binary_classification_label_transform(label) for label in train_dataset.targets])
         validation_dataset.targets = torch.tensor([binary_classification_label_transform(label) for label in validation_dataset.targets])
-    
-    
-    dataset = train_dataset
-    device = torch.device(f'cuda:0')
-
-    n = args.num_clients
-    batch_size = args.batch_size
-    
-    lengths = [len(dataset) // n] * n  #
-    lengths[-1] += len(dataset) % n  #
-    
-    generator = torch.Generator().manual_seed(42)
-    subsets = random_split(dataset, lengths, generator=generator)
-    
-    
-    train_dataloader = DataLoader(dataset, batch_size=128, shuffle=False)
+    '''
+    ## make global dataloader.
+    """
     validation_dataloader = DataLoader(validation_dataset, batch_size=128, shuffle=False)
-
-    
+    """
+    data_collator = LLMDataCollator(tokenizer=tokenizer)
+    validation_dataloader= DataLoader(eval_dataset, batch_size=args.batch_size, collate_fn=data_collator)
+    subsets = list_train_dataset
     ### communicator
     if args.opt_strategy == 'DSGD' or args.opt_strategy == "DZO":
         communicator = DSGD_Communicator(args)
@@ -178,7 +179,8 @@ def main_(world_size, args):
         dataloaders = [DataLoader(subset, batch_size=batch_size, shuffle=False) for subset in subsets]
         for client, dataloader in zip(client_list, dataloaders):
             client.setup_trainloader(dataloader)
-    else: # client setup
+    else: # client setup ## 각 client에 dataloader 할당.
+
         futures =[]
         n_worker = world_size - 1
         assert args.num_clients % n_worker == 0
@@ -187,13 +189,7 @@ def main_(world_size, args):
             end =  int(args.num_clients / n_worker)  * (i + 1)
             futures.append(rpc.rpc_async(f"gpu_{i}", worker_set_up ,args=(args, i, client_list[start:end], subsets[start: end] )))
         [fut.wait() for fut in futures]
-
-        
-    if args.model == "logistic_regression":
-        criterion = nn.BCELoss()  # 이진 교차 엔트로피 손실 함수
-    else:
-        criterion = nn.CrossEntropyLoss()
-    ## 각 client에 dataloader 할당.
+    
     ## init train
     num_epoch = 0
     num_batch = 0

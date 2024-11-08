@@ -58,9 +58,7 @@ def get_args():
     parser.add_argument('--dataset', type=str, default='instruct', choices=['instruct', 'dolly'])
     parser.add_argument('--max_length', type=int, default=1024, help='the max number of tokens of a data instance')
     parser.add_argument('--use_prompts', default=True, help='if `true`, the prompt template from alpaca is adopted')
-
-    # Model
-    parser.add_argument('--model', type=str, default='datajuicer/LLaMA-1B-dj-refine-150B')
+    parser.add_argument('--model', type=str, default='facebook/opt-125m', choices=['facebook/opt-125m', 'datajuicer/LLaMA-1B-dj-refine-150B', "meta-llama/Llama-3.2-3B"])
 
 
 

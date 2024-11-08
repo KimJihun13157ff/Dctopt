@@ -55,7 +55,8 @@ def get_loaders(args, only_eval=False):
             n_parts = [int(len(train_set) / args.num_clients) for _ in range(args.num_clients - 1)]
             n_parts.append(len(train_set) - sum(n_parts))
             split_trainsets = torch.utils.data.dataset.random_split(train_set, n_parts)
-
+        return split_trainsets, eval_set, tokenizer
+        '''
         list_train_loader = [
             DataLoader(
                 subset, shuffle=True, batch_size=args.batch_size, collate_fn=data_collator
@@ -64,10 +65,12 @@ def get_loaders(args, only_eval=False):
         eval_loader = DataLoader(
             eval_set, batch_size=args.batch_size, collate_fn=data_collator
         )
+        '''
         
     elif args.dataset in ['instruct']:
         from utils_data.natural_instruction_loader import get_instruction_dataset
-        list_train_loader, eval_loader = get_instruction_dataset(args, tokenizer, only_eval=only_eval)
+        #list_train_loader, eval_loader = get_instruction_dataset(args, tokenizer, only_eval=only_eval)
+        list_train_dataset, eval_dataset = get_instruction_dataset(args, tokenizer, only_eval=only_eval)
+        return list_train_dataset, eval_dataset, tokenizer
     else:
         raise AttributeError(f'dataset {args.dataset} not implemented')
-    return list_train_loader, eval_loader, tokenizer

@@ -101,10 +101,6 @@ class dummy_Client(Client):
 class CHOCO_Client(Client):
     def __init__(self, args, model, idx, device, comm_rref, sparsificaition_r):
         super().__init__(args, model, idx, device, comm_rref)
-        if args.model == "logistic_regression":
-            self.criterion = nn.BCELoss()
-        else:
-            self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.SGD(self.model.parameters(), lr=self.args.lr ,weight_decay= self.args.weight_decay)
         self.x_hat = {name: torch.zeros_like(param).to(self.device) for name, param in model.named_parameters()}
         self.compressor = Sparsification(op= 'top_k', ratio=sparsificaition_r) # 1-r% are alive
@@ -230,13 +226,7 @@ class CHOCO_DZO_Client(Client):
 class DSGD_Client(Client):
     def __init__(self, args, model, idx, device, comm_rref):
         super().__init__(args, model, idx, device, comm_rref)
-        if args.model == "logistic_regression":
-            self.criterion = nn.BCELoss()
-        else:
-            self.criterion = nn.CrossEntropyLoss()
-        #self.optimizer = optim.SGD(self.model.parameters(), lr=self.args.lr ,weight_decay= self.args.weight_decay)
-        self.optimizer = optim.SGD(self.model.parameters(), lr=self.args.lr ,weight_decay= self.args.weight_decay)
-        #self.sam_optimizer = SAM(self.optimizer, self.model, 0.05)
+
     def local_iteration(self):
         self.total_round += 1
         self.DSGD_local_iter()
@@ -244,7 +234,6 @@ class DSGD_Client(Client):
         self.DSGD_communicate()
 
     def DSGD_local_iter(self):
-        
         self.model = self.model.to(self.device)
         self.model.train()
         for _ in range(self.args.local_iter):
@@ -256,6 +245,15 @@ class DSGD_Client(Client):
                 self.total_epoch +=1
                 batch = next(self.train_iterator)
                 self.total_batch +=1
+                batch = {
+                    'input_ids': batch['input_ids'].to(self.device),
+                    'labels': batch['labels'].to(self.device),
+                    'attention_mask': batch['attention_mask'].to(self.device) 
+                }
+      
+        
+                
+                
             data, target = batch[0].to(self.device).float(), batch[1].to(self.device)
             self.optimizer.zero_grad()
             outputs = self.model(data)

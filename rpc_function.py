@@ -20,10 +20,26 @@ def setup_seed(seed):
 def worker_set_up(args, pidx, client_list, datasets):
     global_vars.Client_list = client_list
     global_vars.Process_index = pidx 
+    
+    
+    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+    tokenizer.model_max_length = args.max_length
+    special_tokens = dict()
+    if tokenizer.pad_token is None:
+        special_tokens["pad_token"] = DefaultToken.PAD_TOKEN.value
+    if tokenizer.eos_token is None:
+        special_tokens["eos_token"] = DefaultToken.EOS_TOKEN.value
+    if tokenizer.bos_token is None:
+        special_tokens["bos_token"] = DefaultToken.BOS_TOKEN.value
+    if tokenizer.unk_token is None:
+        special_tokens["unk_token"] = DefaultToken.UNK_TOKEN.value
+    tokenizer.add_special_tokens(special_tokens)
+    data_collator = LLMDataCollator(tokenizer=tokenizer)
+
 
 
     for client, dataset in zip(global_vars.Client_list, datasets):
-        loader=DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+        loader= DataLoader(dataset, shuffle=True, batch_size=args.batch_size, collate_fn=data_collator)
         client.setup_trainloader(loader)
         client.setup_device(pidx)
     
